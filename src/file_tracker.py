@@ -1,0 +1,212 @@
+import os
+import copy
+import functools
+
+import ujson as json
+
+
+class InvalidPathError(Exception):
+    def __init__(self, message: str = "Invalid file or directory"):
+        super().__init__(message)
+
+
+class OSManager:
+    @staticmethod
+    def get_abspath(path: str, return_path: bool = False) -> str:
+        if isinstance(path, str) and (os.path.isfile(path) or os.path.isdir(path)):
+            return os.path.abspath(path)
+        if return_path:
+            return path
+        raise InvalidPathError(path)
+
+    @staticmethod
+    def format_abspath(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            args = tuple(
+                OSManager.get_abspath(arg, return_path=True)
+                if isinstance(arg, str)
+                else arg
+                for arg in args
+            )
+            kwargs = {
+                key: OSManager.get_abspath(value, return_path=True)
+                if isinstance(value, str)
+                else value
+                for key, value in kwargs.items()
+            }
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    @staticmethod
+    def get_dir_file(path: str) -> list[str]:
+        path = OSManager.get_abspath(path)
+        return {
+            full_path
+            for filename in os.listdir(path)
+            if os.path.isfile(full_path := os.path.join(path, filename))
+        }
+
+    @staticmethod
+    def recursive_get_dir_file(path: str) -> list[str]:
+        file = set()
+        for dirpath, _, filenames in os.walk(path):
+            for filename in filenames:
+                file.add(os.path.join(dirpath, filename))
+        return file
+
+
+class JsonHandler:
+    @staticmethod
+    def _json_write(
+        content: dict,
+        file_path: str,
+        mode: str = "w",
+        file_setting: dict = None,
+        json_setting: dict = None,
+    ):
+        file_setting = file_setting or {"encoding": "utf-8"}
+        json_setting = json_setting or {"ensure_ascii": False, "indent": 4}
+
+        with open(file_path, mode, **file_setting) as file:
+            json.dump(content, file, **json_setting)
+
+    @staticmethod
+    def json_write(*args, **kwargs):
+        JsonHandler._json_write(*args, **kwargs)
+
+    @staticmethod
+    def _json_read(
+        file_path: str,
+        mode: str = "r",
+        file_setting: dict = None,
+    ):
+        file_setting = file_setting or {"encoding": "utf-8"}
+
+        with open(file_path, mode, **file_setting) as file:
+            content = json.load(file)
+
+        return content
+
+    @staticmethod
+    def json_read(*args, **kwargs):
+        return JsonHandler._json_read(*args, **kwargs)
+
+
+class ConfigFileTemplate:
+    config: dict = {"tracked": []}
+
+
+class ConfigFileHandler:
+    def __init__(self, config_path: str = "user_config.json"):
+        self.config: dict = copy.deepcopy(ConfigFileTemplate.config)
+        self.config_path: str = config_path
+
+        if not self.config_exists():
+            self.create_template_config()
+
+    def config_exists(self) -> bool:
+        return os.path.exists(self.config_path)
+
+    def create_template_config(self):
+        config_to_save = copy.deepcopy(self.config)
+        config_to_save["tracked"] = list(self.config["tracked"])
+        JsonHandler.json_write(config_to_save, self.config_path)
+
+    def read_config(self) -> dict:
+        content = JsonHandler.json_read(self.config_path)
+        content["tracked"] = set(content.get("tracked", []))
+        return content
+
+    def safe_read_config(self, retries: int = 3):
+        for _ in range(3):
+            try:
+                return self.read_config()
+            except json.JSONDecodeError:
+                self.create_template_config()  # Force overwrite corrupted config file with template file
+            except Exception as e:
+                raise e
+        raise RuntimeError("Failed to read configuration after multiple attempts")
+
+    @staticmethod
+    def write_config(config: dict, config_path: str):
+        config_to_save = copy.deepcopy(config)
+        config_to_save["tracked"] = list(config["tracked"])
+        JsonHandler.json_write(config_to_save, config_path)
+
+
+class Tracker:
+    def __init__(
+        self,
+        config: dict,
+        config_path: str,
+        auto_save: bool = True,
+        auto_clean: bool = True,
+    ):
+        self.config = config
+        self.config["tracked"] = set(config.get("tracked", []))
+        self.config_path = config_path
+        self.auto_save = auto_save
+        self.auto_clean = auto_clean
+
+    def clean_tracked_files(self):
+        self.config["tracked"] = {
+            path for path in self.config["tracked"] if os.path.isfile(path)
+        }
+
+    def prepare_for_export(self):
+        self.clean_tracked_files()
+
+    def export_config(self):
+        if self.auto_clean:
+            self.prepare_for_export()
+        config_to_save = self.config.copy()
+        config_to_save["tracked"] = list(self.config["tracked"])
+        ConfigFileHandler.write_config(config_to_save, self.config_path)
+
+    @staticmethod
+    def _auto_export_config(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            result = func(self, *args, **kwargs)
+            if self.auto_save:
+                self.export_config()
+            return result
+
+        return wrapper
+
+    @_auto_export_config
+    @OSManager.format_abspath
+    def add_file(self, path: str):
+        if os.path.isfile(path):
+            self.config["tracked"].add(path)
+
+    @_auto_export_config
+    @OSManager.format_abspath
+    def add_dir(self, path: str, recursive: bool = False) -> list[str]:
+        if recursive:
+            self.config["tracked"].update(
+                OSManager.recursive_get_dir_file(path)
+                if recursive
+                else OSManager.get_dir_file(path)
+            )
+
+    @_auto_export_config
+    @OSManager.format_abspath
+    def remove_file(self, path: str):
+        self.config["tracked"].discard(path)
+
+
+if __name__ == "__main__":
+    config_file_handler = ConfigFileHandler()
+    tracker = Tracker(
+        config=config_file_handler.safe_read_config(),
+        config_path=config_file_handler.config_path,
+        auto_save=True,
+        auto_clean=True,
+    )
+    tracker.add_dir("./")
+    tracker.add_dir("./")
+    a = config_file_handler.read_config()
+    print(a)
