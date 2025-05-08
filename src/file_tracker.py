@@ -1,6 +1,7 @@
 import os
 import copy
 import functools
+from typing import TypedDict
 
 import ujson as json
 
@@ -11,6 +12,10 @@ class InvalidPathError(Exception):
 
 
 class OSManager:
+    @staticmethod
+    def is_absolute(path: str) -> bool:
+        return os.path.isabs(path)
+
     @staticmethod
     def get_abspath(path: str, return_path: bool = False) -> str:
         if isinstance(path, str) and (os.path.isfile(path) or os.path.isdir(path)):
@@ -40,21 +45,32 @@ class OSManager:
         return wrapper
 
     @staticmethod
-    def get_dir_file(path: str) -> list[str]:
+    def get_rel_path(path: str, root: str) -> str:
+        try:
+            return os.path.relpath(path, root)
+        except ValueError:
+            return ""
+
+    @staticmethod
+    def get_dir_file(path: str, root: str) -> dict[str, dict]:
         path = OSManager.get_abspath(path)
         return {
-            full_path
+            file_info["path"]: file_info
             for filename in os.listdir(path)
             if os.path.isfile(full_path := os.path.join(path, filename))
+            and (file_info := FileInfoCollector.get_file_info(full_path, root))
         }
 
     @staticmethod
-    def recursive_get_dir_file(path: str) -> list[str]:
-        file = set()
+    def recursive_get_dir_file(path: str, root: str) -> dict[str, dict]:
+        files = {}
         for dirpath, _, filenames in os.walk(path):
             for filename in filenames:
-                file.add(os.path.join(dirpath, filename))
-        return file
+                full_path = os.path.join(dirpath, filename)
+                if os.path.isfile(full_path):
+                    info = FileInfoCollector.get_file_info(full_path, root)
+                    files[info["path"]] = info
+        return files
 
 
 class JsonHandler:
@@ -94,8 +110,20 @@ class JsonHandler:
         return JsonHandler._json_read(*args, **kwargs)
 
 
+class TrackedFileInfo(TypedDict, total=False):
+    path: str
+    rel_path: str
+    size: int
+    mtime: float
+    outside_root: bool
+
+
+class ConfigSchema(TypedDict):
+    tracked: dict[str, TrackedFileInfo]
+
+
 class ConfigFileTemplate:
-    config: dict = {"tracked": []}
+    config: ConfigSchema = {"tracked": {}}
 
 
 class ConfigFileHandler:
@@ -111,18 +139,45 @@ class ConfigFileHandler:
 
     def create_template_config(self):
         config_to_save = copy.deepcopy(self.config)
-        config_to_save["tracked"] = list(self.config["tracked"])
+        config_to_save["tracked"] = dict(self.config["tracked"])
         JsonHandler.json_write(config_to_save, self.config_path)
+
+    @staticmethod
+    def validate_config_structure(config: dict, template: dict = None) -> dict:
+        if not isinstance(config, dict):
+            raise ValueError("Config must be a dictionary")
+
+        template = template or ConfigFileTemplate.config
+        validated = {}
+
+        for key, default_value in template.items():
+            if key not in config:
+                validated[key] = copy.deepcopy(default_value)
+                continue
+
+            value = config[key]
+
+            if isinstance(default_value, dict) and isinstance(value, dict):
+                # Recursive validation for nested dict
+                validated[key] = ConfigFileHandler.validate_config_structure(
+                    value, default_value
+                )
+            elif isinstance(value, type(default_value)):
+                validated[key] = value
+            else:
+                validated[key] = copy.deepcopy(default_value)
+
+        return validated
 
     def read_config(self) -> dict:
         content = JsonHandler.json_read(self.config_path)
-        content["tracked"] = set(content.get("tracked", []))
         return content
 
     def safe_read_config(self, retries: int = 3):
         for _ in range(3):
             try:
-                return self.read_config()
+                content = self.read_config()
+                return self.validate_config_structure(content)
             except json.JSONDecodeError:
                 self.create_template_config()  # Force overwrite corrupted config file with template file
             except Exception as e:
@@ -132,8 +187,37 @@ class ConfigFileHandler:
     @staticmethod
     def write_config(config: dict, config_path: str):
         config_to_save = copy.deepcopy(config)
-        config_to_save["tracked"] = list(config["tracked"])
+        config_to_save["tracked"] = dict(config["tracked"])
         JsonHandler.json_write(config_to_save, config_path)
+
+
+class FileInfoCollector:
+    @staticmethod
+    def get_size(path: str) -> int:
+        return os.path.getsize(path)
+
+    @staticmethod
+    def get_mtime(path: str) -> float:
+        return os.path.getmtime(path)
+
+    @staticmethod
+    def is_outside_root(path: str, root: str) -> bool:
+        abs_path = OSManager.get_abspath(path)
+        abs_root = OSManager.get_abspath(root)
+        return not abs_path.startswith(abs_root)
+
+    @staticmethod
+    def get_file_info(path: str, root: str) -> dict:
+        abs_path = OSManager.get_abspath(path)
+        rel_path = OSManager.get_rel_path(abs_path, root)
+
+        return {
+            "path": abs_path,
+            "rel_path": rel_path,
+            "size": FileInfoCollector.get_size(abs_path),
+            "mtime": FileInfoCollector.get_mtime(abs_path),
+            "outside_root": FileInfoCollector.is_outside_root(abs_path, root),
+        }
 
 
 class Tracker:
@@ -145,14 +229,16 @@ class Tracker:
         auto_clean: bool = True,
     ):
         self.config = config
-        self.config["tracked"] = set(config.get("tracked", []))
+        self.config["tracked"] = dict(config.get("tracked", {}))
         self.config_path = config_path
         self.auto_save = auto_save
         self.auto_clean = auto_clean
 
     def clean_tracked_files(self):
         self.config["tracked"] = {
-            path for path in self.config["tracked"] if os.path.isfile(path)
+            path: info
+            for path, info in self.config["tracked"].items()
+            if os.path.isfile(path)
         }
 
     def prepare_for_export(self):
@@ -162,7 +248,7 @@ class Tracker:
         if self.auto_clean:
             self.prepare_for_export()
         config_to_save = self.config.copy()
-        config_to_save["tracked"] = list(self.config["tracked"])
+        config_to_save["tracked"] = dict(self.config["tracked"])
         ConfigFileHandler.write_config(config_to_save, self.config_path)
 
     @staticmethod
@@ -177,25 +263,24 @@ class Tracker:
         return wrapper
 
     @_auto_export_config
-    @OSManager.format_abspath
-    def add_file(self, path: str):
+    def add_file(self, path: str, root: str = "./"):
         if os.path.isfile(path):
-            self.config["tracked"].add(path)
+            file_info = FileInfoCollector.get_file_info(path, root)
+            self.config["tracked"][file_info["path"]] = file_info
 
     @_auto_export_config
-    @OSManager.format_abspath
-    def add_dir(self, path: str, recursive: bool = False) -> list[str]:
-        if recursive:
-            self.config["tracked"].update(
-                OSManager.recursive_get_dir_file(path)
-                if recursive
-                else OSManager.get_dir_file(path)
-            )
+    def add_dir(self, path: str, root: str, recursive: bool = False):
+        file_dict = (
+            OSManager.recursive_get_dir_file(path, root)
+            if recursive
+            else OSManager.get_dir_file(path, root)
+        )
+        self.config["tracked"].update(file_dict)
 
     @_auto_export_config
     @OSManager.format_abspath
     def remove_file(self, path: str):
-        self.config["tracked"].discard(path)
+        self.config["tracked"].pop(path, None)
 
 
 if __name__ == "__main__":
@@ -206,7 +291,6 @@ if __name__ == "__main__":
         auto_save=True,
         auto_clean=True,
     )
-    tracker.add_dir("./")
-    tracker.add_dir("./")
+    tracker.add_dir("./", root="./../", recursive=False)
     a = config_file_handler.read_config()
     print(a)
