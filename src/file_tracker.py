@@ -1,7 +1,8 @@
+import re
 import os
 import copy
 import functools
-from typing import TypedDict
+from typing import TypedDict, List
 
 import ujson as json
 
@@ -17,9 +18,11 @@ class OSManager:
         return os.path.isabs(path)
 
     @staticmethod
-    def get_abspath(path: str, return_path: bool = False) -> str:
+    def get_abspath(
+        path: str, *, return_path: bool = False, force_real_path: bool = True
+    ) -> str:
         if isinstance(path, str) and (os.path.isfile(path) or os.path.isdir(path)):
-            return os.path.abspath(path)
+            return os.path.realpath(path) if force_real_path else os.path.abspath(path)
         if return_path:
             return path
         raise InvalidPathError(path)
@@ -28,18 +31,14 @@ class OSManager:
     def format_abspath(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            args = tuple(
-                OSManager.get_abspath(arg, return_path=True)
-                if isinstance(arg, str)
-                else arg
-                for arg in args
-            )
-            kwargs = {
-                key: OSManager.get_abspath(value, return_path=True)
-                if isinstance(value, str)
-                else value
-                for key, value in kwargs.items()
-            }
+            def normalize(val):
+                if isinstance(val, str) and (os.path.isfile(val) or os.path.isdir(val)):
+                    return OSManager.get_abspath(val, return_path=True)
+                return val
+
+            args = tuple(normalize(arg) for arg in args)
+            kwargs = {k: normalize(v) for k, v in kwargs.items()}
+
             return func(*args, **kwargs)
 
         return wrapper
@@ -78,6 +77,7 @@ class JsonHandler:
     def _json_write(
         content: dict,
         file_path: str,
+        *,
         mode: str = "w",
         file_setting: dict = None,
         json_setting: dict = None,
@@ -95,6 +95,7 @@ class JsonHandler:
     @staticmethod
     def _json_read(
         file_path: str,
+        *,
         mode: str = "r",
         file_setting: dict = None,
     ):
@@ -123,12 +124,13 @@ class ConfigSchema(TypedDict):
 
 
 class ConfigFileTemplate:
-    config: ConfigSchema = {"tracked": {}}
+    def get_default_config() -> ConfigSchema:
+        return {"tracked": {}}
 
 
 class ConfigFileHandler:
     def __init__(self, config_path: str = "user_config.json"):
-        self.config: dict = copy.deepcopy(ConfigFileTemplate.config)
+        self.config: dict = copy.deepcopy(ConfigFileTemplate.get_default_config())
         self.config_path: str = config_path
 
         if not self.config_exists():
@@ -147,7 +149,7 @@ class ConfigFileHandler:
         if not isinstance(config, dict):
             raise ValueError("Config must be a dictionary")
 
-        template = template or ConfigFileTemplate.config
+        template = template or ConfigFileTemplate.get_default_config()
         validated = {}
 
         for key, default_value in template.items():
@@ -173,11 +175,12 @@ class ConfigFileHandler:
         content = JsonHandler.json_read(self.config_path)
         return content
 
-    def safe_read_config(self, retries: int = 3):
+    def safe_read_config(self, *, retries: int = 3):
         for _ in range(3):
             try:
                 content = self.read_config()
-                return self.validate_config_structure(content)
+                self.config = self.validate_config_structure(content)
+                return self.config
             except json.JSONDecodeError:
                 self.create_template_config()  # Force overwrite corrupted config file with template file
             except Exception as e:
@@ -204,12 +207,18 @@ class FileInfoCollector:
     def is_outside_root(path: str, root: str) -> bool:
         abs_path = OSManager.get_abspath(path)
         abs_root = OSManager.get_abspath(root)
-        return not abs_path.startswith(abs_root)
+
+        try:
+            common = os.path.commonpath([abs_path, abs_root])
+            return common != abs_root
+        except ValueError:
+            # Happens on Windows if paths are on different drives
+            return True
 
     @staticmethod
     def get_file_info(path: str, root: str) -> dict:
         abs_path = OSManager.get_abspath(path)
-        rel_path = OSManager.get_rel_path(abs_path, root)
+        rel_path = OSManager.get_rel_path(abs_path, root) or ''
 
         return {
             "path": abs_path,
@@ -225,6 +234,7 @@ class Tracker:
         self,
         config: dict,
         config_path: str,
+        *,
         auto_save: bool = True,
         auto_clean: bool = True,
     ):
@@ -269,7 +279,7 @@ class Tracker:
             self.config["tracked"][file_info["path"]] = file_info
 
     @_auto_export_config
-    def add_dir(self, path: str, root: str, recursive: bool = False):
+    def add_dir(self, path: str, root: str, *, recursive: bool = False):
         file_dict = (
             OSManager.recursive_get_dir_file(path, root)
             if recursive
@@ -291,6 +301,6 @@ if __name__ == "__main__":
         auto_save=True,
         auto_clean=True,
     )
-    tracker.add_dir("./", root="./../", recursive=False)
+    tracker.add_dir("./../", root="./", recursive=False)
     a = config_file_handler.read_config()
     print(a)
