@@ -2,7 +2,7 @@ import re
 import os
 import copy
 import functools
-from typing import TypedDict, List
+from typing import TypedDict, List, Optional
 
 import ujson as json
 
@@ -218,7 +218,7 @@ class FileInfoCollector:
     @staticmethod
     def get_file_info(path: str, root: str) -> dict:
         abs_path = OSManager.get_abspath(path)
-        rel_path = OSManager.get_rel_path(abs_path, root) or ''
+        rel_path = OSManager.get_rel_path(abs_path, root) or ""
 
         return {
             "path": abs_path,
@@ -229,6 +229,29 @@ class FileInfoCollector:
         }
 
 
+class FileFilter:
+    def __init__(
+        self, pattern: Optional[str] = None, *, only_match_filename: bool = True
+    ):
+        self.pattern = pattern
+        self.only_match_filename = only_match_filename
+        self.regex = re.compile(pattern) if pattern else None
+
+    def filter_files(self, files: List[str]) -> List[str]:
+        if not self.regex:
+            return files
+
+        return [file for file in files if self.regex.match(file)]
+
+    def is_match(self, full_path: str) -> bool:
+        if not self.regex:
+            return True
+
+        target = os.path.basename(full_path) if self.only_match_filename else full_path
+
+        return self.regex.match(target) is not None
+
+
 class Tracker:
     def __init__(
         self,
@@ -237,12 +260,14 @@ class Tracker:
         *,
         auto_save: bool = True,
         auto_clean: bool = True,
+        file_filter: Optional[FileFilter] = None,
     ):
         self.config = config
         self.config["tracked"] = dict(config.get("tracked", {}))
         self.config_path = config_path
         self.auto_save = auto_save
         self.auto_clean = auto_clean
+        self.file_filter = file_filter or FileFilter()
 
     def clean_tracked_files(self):
         self.config["tracked"] = {
@@ -274,8 +299,10 @@ class Tracker:
 
     @_auto_export_config
     def add_file(self, path: str, root: str = "./"):
-        if os.path.isfile(path):
-            file_info = FileInfoCollector.get_file_info(path, root)
+        full_path = OSManager.get_abspath(path)
+
+        if os.path.isfile(full_path) and self.file_filter.is_match(full_path):
+            file_info = FileInfoCollector.get_file_info(full_path, root)
             self.config["tracked"][file_info["path"]] = file_info
 
     @_auto_export_config
@@ -285,6 +312,12 @@ class Tracker:
             if recursive
             else OSManager.get_dir_file(path, root)
         )
+
+        file_dict = {
+            file_path: file_info
+            for file_path, file_info in file_dict.items()
+            if self.file_filter.is_match(file_path)
+        }
         self.config["tracked"].update(file_dict)
 
     @_auto_export_config
@@ -295,12 +328,14 @@ class Tracker:
 
 if __name__ == "__main__":
     config_file_handler = ConfigFileHandler()
+    file_filter = FileFilter(pattern=r"[\S ]*.py")
     tracker = Tracker(
         config=config_file_handler.safe_read_config(),
         config_path=config_file_handler.config_path,
         auto_save=True,
         auto_clean=True,
+        file_filter=file_filter,
     )
-    tracker.add_dir("./../", root="./", recursive=False)
+    tracker.add_dir("./", root="./", recursive=False)
     a = config_file_handler.read_config()
     print(a)
