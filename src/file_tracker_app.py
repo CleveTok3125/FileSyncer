@@ -2,8 +2,8 @@ import os
 from typing import List
 
 from textual.app import App, ComposeResult
-from textual.widgets import Tree, Header, Footer
-from textual.containers import Container
+from textual.widgets import Tree, Header, Footer, Static, Button
+from textual.containers import Container, Vertical, HorizontalGroup
 from textual.widgets.tree import TreeNode
 
 from file_tracker_core import ConfigFileHandler
@@ -12,10 +12,15 @@ from file_tracker_core import ConfigFileHandler
 class PathBeautify:
     @staticmethod
     def simplify(paths: List[str], *, connector: str = " > ") -> List[str]:
+        if not paths:
+            return []
+
         common_prefix = os.path.commonpath(paths)
+
         if common_prefix.startswith(os.path.sep):
             prefix = common_prefix[1:]
         prefix = connector.join(os.path.normpath(prefix).split(os.path.sep))
+
         return [
             os.path.join(prefix, os.path.relpath(path, common_prefix)) for path in paths
         ]
@@ -47,27 +52,49 @@ class Forests:
         Forests.populate_tree(tree.root, tree_data)
         return tree
 
+class UserConfig:
+    config_path = 'user_config.json'
 
 class CoreAPI:
-    config_file_handler: ConfigFileHandler = ConfigFileHandler()
-    files_tracked: List[str] = config_file_handler.get_files_tracked()
-    files_tracked = PathBeautify.simplify(files_tracked)
+    @staticmethod
+    def get_files_tracked() -> List[str]:
+        config_file_handler: ConfigFileHandler = ConfigFileHandler(UserConfig.config_path)
+        files_tracked: List[str] = config_file_handler.get_files_tracked()
+        files_tracked = PathBeautify.simplify(files_tracked)
+        return files_tracked
+
+
+class TreeContainer(Container):
+    def compose(self) -> ComposeResult:
+        paths = CoreAPI.get_files_tracked()
+
+        if not paths:
+            yield Static("No files are tracked", id="no-files-messages")
+        else:
+            tree = Forests.plant_tree(paths)
+            yield tree
+
+
+class ActionButton(HorizontalGroup):
+    def compose(self) -> ComposeResult:
+        yield Button("Add File", id="add_file", classes="action-button")
+        yield Button("Add Directory", id="add_dir", classes="action-button")
+        yield Button("Remove File", id="remove_file", classes="action-button")
+        yield Button("Save File", id="save_file", classes="action-button")
 
 
 class MainApp(App):
-    CSS_PATH = None
+    CSS_PATH = "file_tracker_app.tcss"
     BINDINGS = [("d", "toggle_dark", "Toggle dark mode")]
 
     def compose(self) -> ComposeResult:
         yield Header()
+
+        yield Vertical(TreeContainer(id="tree-container"), ActionButton())
+
         yield Footer()
 
-        paths = CoreAPI.files_tracked
-        tree = Forests.plant_tree(paths)
-        yield Container(tree)
-
     def action_toggle_dark(self) -> None:
-        """An action to toggle dark mode."""
         self.theme = (
             "textual-dark" if self.theme == "textual-light" else "textual-light"
         )
