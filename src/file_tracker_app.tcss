@@ -2,8 +2,8 @@
     text-align: center;
     align: center middle;
     padding: 2;
-    color: #ffff00;
-    background: #000000;
+    color: $warning;
+    background: $surface;
 }
 
 ActionButton {
@@ -13,6 +13,18 @@ ActionButton {
 }
 
 .action-button {
-    width:1fr;
+    width:  1fr;
     text-align: center;
+}
+
+#message-bar {
+    padding: 0 1;
+}
+
+.messages {
+    background: $surface;
+}
+
+#message-bar {
+    background: $panel;
 }
