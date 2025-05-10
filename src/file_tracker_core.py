@@ -159,11 +159,15 @@ class ConfigFileHandler:
 
             value = config[key]
 
-            if isinstance(default_value, dict) and isinstance(value, dict):
-                # Recursive validation for nested dict
-                validated[key] = ConfigFileHandler.validate_config_structure(
-                    value, default_value
-                )
+            if isinstance(default_value, dict):
+                if not isinstance(value, dict):
+                    validated[key] = copy.deepcopy(default_value)
+                else:
+                    validated[key] = {
+                        k: v
+                        for k, v in value.items()
+                        if isinstance(k, str) and isinstance(v, dict)
+                    }
             elif isinstance(value, type(default_value)):
                 validated[key] = value
             else:
@@ -176,7 +180,7 @@ class ConfigFileHandler:
         return content
 
     def safe_read_config(self, *, retries: int = 3):
-        for _ in range(3):
+        for _ in range(retries):
             try:
                 content = self.read_config()
                 self.config = self.validate_config_structure(content)
@@ -192,6 +196,11 @@ class ConfigFileHandler:
         config_to_save = copy.deepcopy(config)
         config_to_save["tracked"] = dict(config["tracked"])
         JsonHandler.json_write(config_to_save, config_path)
+
+    def get_files_tracked(self):
+        config = self.safe_read_config()
+        files_tracked = config["tracked"]
+        return list(files_tracked.keys())
 
 
 class FileInfoCollector:
@@ -328,14 +337,12 @@ class Tracker:
 
 if __name__ == "__main__":
     config_file_handler = ConfigFileHandler()
-    file_filter = FileFilter(pattern=r"[\S ]*.py")
     tracker = Tracker(
         config=config_file_handler.safe_read_config(),
         config_path=config_file_handler.config_path,
         auto_save=True,
         auto_clean=True,
-        file_filter=file_filter,
     )
-    tracker.add_dir("./", root="./", recursive=False)
+    tracker.add_dir("./../", root="./", recursive=True)
     a = config_file_handler.read_config()
     print(a)
