@@ -3,9 +3,16 @@ from typing import List, Callable
 
 from textual import on
 from textual.app import App, ComposeResult
-from textual.widgets import Tree, Header, Footer, Static, Button, Input, Label
-from textual.containers import Container, Vertical, HorizontalGroup
-from textual.widgets.tree import TreeNode
+from textual.widgets import (
+    Tree,
+    Header,
+    Footer,
+    Static,
+    Button,
+    Input,
+    DirectoryTree,
+)
+from textual.containers import Container, Vertical, HorizontalGroup, Horizontal
 from textual.reactive import reactive
 
 from file_tracker_core import ConfigFileHandler, Tracker, OSManager
@@ -59,6 +66,11 @@ class PathBeautify:
 
         return os.sep.join([root, "..."] + kept_middle)
 
+    @staticmethod
+    def get_parent_directory(path: str) -> str:
+        parent = os.path.dirname(os.path.abspath(path))
+        return parent if parent != path else path
+
 
 class Forests:
     @staticmethod
@@ -72,7 +84,7 @@ class Forests:
         return tree
 
     @staticmethod
-    def populate_tree(node: TreeNode, data: dict):
+    def populate_tree(node: Tree, data: dict):
         for key, subtree in sorted(data.items()):
             is_file = not subtree
             child = node.add(key, allow_expand=not is_file)
@@ -84,6 +96,7 @@ class Forests:
         tree_data = Forests.build_tree_data(paths)
         tree = Tree("root")
         Forests.populate_tree(tree.root, tree_data)
+        tree.root.expand()
         return tree
 
 
@@ -92,6 +105,7 @@ class UserConfig:
     config_path = "user_config.json"
     auto_save = True
     auto_clean = True
+    path_filter_pattern = r""
 
 
 class UserInput:
@@ -135,24 +149,34 @@ class MessageBar(Static):
 
 
 class StatusBar(Static):
-    cwd: reactive[str] = reactive(UserConfig.root)
+    cwd: reactive[str] = reactive(
+        PathBeautify.truncate_path(
+            OSManager.get_abspath(
+                UserConfig.root, return_path=True, force_real_path=False
+            )
+        )
+    )
     auto_save: reactive[bool] = reactive(UserConfig.auto_save)
     auto_clean: reactive[bool] = reactive(UserConfig.auto_clean)
+    filter_pattern = reactive(UserConfig.path_filter_pattern)
 
     def on_mount(self) -> None:
-        cwd: str = UserConfig.root
-        auto_save: bool = UserConfig.auto_save
-        auto_clean: bool = UserConfig.auto_clean
         self.update_status()
 
     def update_status(self) -> None:
-        status_message = f"CWD: {self.cwd} | Auto-save: {'Enabled' if self.auto_save else 'Disabled'} | Auto-clean: {'Enabled' if self.auto_clean else 'Disabled'}"
+        status_message = f'CWD: {self.cwd} | Filter Pattern: r"{self.filter_pattern}" | Auto-save: {"Enabled" if self.auto_save else "Disabled"} | Auto-clean: {"Enabled" if self.auto_clean else "Disabled"}'
         self.update(status_message)
 
     def watch_cwd(self, new_value: str) -> None:
         self.update_status()
 
     def watch_auto_save(self, new_value: bool) -> None:
+        self.update_status()
+
+    def watch_auto_clean(self, new_value: str) -> None:
+        self.update_status()
+
+    def watch_filter_pattern(self, new_value: str) -> None:
         self.update_status()
 
 
@@ -176,12 +200,27 @@ class TreeContainer(Container):
         self.mount_all(self.build_tree())
 
 
+class RefreshableDirectoryTree(DirectoryTree):
+    def __init__(self, path: str = None):
+        path = path or PathBeautify.get_parent_directory(os.getcwd())
+        super().__init__(path)
+        self.base_path = path
+
+    def reload_tree(self) -> None:
+        path = PathBeautify.get_parent_directory(os.getcwd())
+        self.remove()
+        new_tree = RefreshableDirectoryTree(path)
+        if self.parent:
+            self.parent.mount(new_tree)
+
+
 class ActionButton(HorizontalGroup):
     def compose(self) -> ComposeResult:
         yield Button("Add File", id="add_file", classes="action-button")
         yield Button("Add Directory", id="add_dir", classes="action-button")
         yield Button("Remove File", id="remove_file", classes="action-button")
-        yield Button("Change working dir", id="change_root", classes="action-button")
+        yield Button("Set Filter", id="set_filter", classes="action-button")
+        yield Button("Change CWD", id="change_root", classes="action-button")
 
 
 class MainApp(App):
@@ -197,7 +236,10 @@ class MainApp(App):
         yield Header()
         yield Vertical(
             StatusBar(id="status-bar", classes="messages"),
-            TreeContainer(id="tree-container"),
+            Horizontal(
+                TreeContainer(id="tree-container"),
+                RefreshableDirectoryTree(),
+            ),
             MessageBar(id="message-bar", classes="messages"),
             Input(
                 placeholder="Enter a path or regular expression here then select one of the buttons below",
@@ -250,6 +292,7 @@ class MainApp(App):
             os.chdir(UserConfig.root)
             shorten_path = PathBeautify.truncate_path(UserConfig.root)
             self.query_one(StatusBar).cwd = shorten_path
+            self.query_one(RefreshableDirectoryTree).reload_tree()
             self._send_message(f"Changed working directory to {shorten_path}")
         else:
             self._send_message("Path does not exist", noti_type="Error")
@@ -258,6 +301,15 @@ class MainApp(App):
     def button_change_root(self) -> None:
         self._get_input()
         self._change_root()
+
+    @on(Button.Pressed, "#set_filter")
+    def button_set_filter(self) -> None:
+        self._get_input()
+        UserConfig.path_filter_pattern = UserInput.value
+        self.query_one(StatusBar).filter_pattern = UserConfig.path_filter_pattern
+        self._send_message(
+            f"Changed filter pattern to {UserConfig.path_filter_pattern}"
+        )
 
     def _input_change_root(self) -> bool:
         user_input: str = UserInput.value
@@ -286,6 +338,18 @@ class MainApp(App):
 
         if not any(listener() for listener in listeners):
             self._send_message(UserInput.value, noti_type="Unknown command")
+
+    def _update_input_with_path(self, event) -> None:
+        input_field = self.query_one(Input)
+        input_field.value = str(event.path)
+
+    @on(DirectoryTree.DirectorySelected)
+    def on_directory_selected(self, event: DirectoryTree.DirectorySelected) -> None:
+        self._update_input_with_path(event)
+
+    @on(DirectoryTree.FileSelected)
+    def on_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        self._update_input_with_path(event)
 
 
 if __name__ == "__main__":
