@@ -28,3 +28,8 @@ ActionButton {
 #message-bar {
     background: $panel;
 }
+
+#status-bar {
+    text-align: right;
+    padding: 0 1;
+}

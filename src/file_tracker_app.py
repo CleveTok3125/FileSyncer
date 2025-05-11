@@ -1,13 +1,14 @@
 import os
-from typing import List
+from typing import List, Callable
 
 from textual import on
 from textual.app import App, ComposeResult
 from textual.widgets import Tree, Header, Footer, Static, Button, Input, Label
 from textual.containers import Container, Vertical, HorizontalGroup
 from textual.widgets.tree import TreeNode
+from textual.reactive import reactive
 
-from file_tracker_core import ConfigFileHandler, Tracker
+from file_tracker_core import ConfigFileHandler, Tracker, OSManager
 
 
 class PathBeautify:
@@ -25,6 +26,38 @@ class PathBeautify:
         return [
             os.path.join(prefix, os.path.relpath(path, common_prefix)) for path in paths
         ]
+
+    @staticmethod
+    def truncate_path(path, max_length=30):
+        if len(path) <= max_length:
+            return path
+
+        parts = path.split(os.sep)
+
+        if len(parts) <= 1:
+            return path
+
+        root = parts[0]
+        middle = parts[1:]
+
+        if len(middle) == 0:
+            return path
+
+        fixed_length = len(root) + len(os.sep) * 2
+        remaining_length = max_length - fixed_length
+
+        kept_middle = []
+        total_length = 0
+
+        for part in reversed(middle):
+            part_length = len(part) + len(os.sep)
+            if total_length + part_length <= remaining_length:
+                kept_middle.insert(0, part)
+                total_length += part_length
+            else:
+                break
+
+        return os.sep.join([root, "..."] + kept_middle)
 
 
 class Forests:
@@ -52,20 +85,6 @@ class Forests:
         tree = Tree("root")
         Forests.populate_tree(tree.root, tree_data)
         return tree
-
-
-class MessageBar(Static):
-    def on_mount(self):
-        self.display = False
-
-    def show_message(self, message: str, duration: float = 3.0):
-        self.update(f"Message: {message}")
-        self.display = True
-        self.set_timer(duration, self.clear_message)
-
-    def clear_message(self):
-        self.update("")
-        self.display = False
 
 
 class UserConfig:
@@ -99,6 +118,42 @@ class CoreAPI:
         files_tracked: List[str] = CoreInstance.config_file_handler.get_files_tracked()
         files_tracked = PathBeautify.simplify(files_tracked)
         return files_tracked
+
+
+class MessageBar(Static):
+    def on_mount(self):
+        self.display = False
+
+    def show_message(self, message: str, duration: float = 3.0):
+        self.update(message)
+        self.display = True
+        self.set_timer(duration, self.clear_message)
+
+    def clear_message(self):
+        self.update("")
+        self.display = False
+
+
+class StatusBar(Static):
+    cwd: reactive[str] = reactive(UserConfig.root)
+    auto_save: reactive[bool] = reactive(UserConfig.auto_save)
+    auto_clean: reactive[bool] = reactive(UserConfig.auto_clean)
+
+    def on_mount(self) -> None:
+        cwd: str = UserConfig.root
+        auto_save: bool = UserConfig.auto_save
+        auto_clean: bool = UserConfig.auto_clean
+        self.update_status()
+
+    def update_status(self) -> None:
+        status_message = f"CWD: {self.cwd} | Auto-save: {'Enabled' if self.auto_save else 'Disabled'} | Auto-clean: {'Enabled' if self.auto_clean else 'Disabled'}"
+        self.update(status_message)
+
+    def watch_cwd(self, new_value: str) -> None:
+        self.update_status()
+
+    def watch_auto_save(self, new_value: bool) -> None:
+        self.update_status()
 
 
 class TreeContainer(Container):
@@ -141,7 +196,7 @@ class MainApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Vertical(
-            Static(id="top-gap", classes="messages"),
+            StatusBar(id="status-bar", classes="messages"),
             TreeContainer(id="tree-container"),
             MessageBar(id="message-bar", classes="messages"),
             Input(
@@ -166,9 +221,18 @@ class MainApp(App):
         tree_container = self.query_one(TreeContainer)
         tree_container.refresh_tree()
 
-    def _send_message(self, message: str, timeout: float = 3.0) -> None:
+    def _send_message(
+        self, message: str, *, noti_type: str = "Message", timeout: float = 3.0
+    ) -> None:
         message_bar = self.query_one("#message-bar", MessageBar)
-        message_bar.show_message(message, timeout)
+        message_bar.show_message(f"{noti_type}: {message}", timeout)
+
+    def action_refresh_tree(self) -> None:
+        self._refresh_tree()
+        self._send_message("Reloaded directory tree")
+
+    def action_quit_app(self) -> None:
+        self.exit()
 
     @on(Button.Pressed, "#add_file")
     def button_add_file(self) -> None:
@@ -178,12 +242,50 @@ class MainApp(App):
         self._refresh_tree()
         self._send_message("File added successfully")
 
-    def action_refresh_tree(self) -> None:
-        self._refresh_tree()
-        self._send_message("Reloaded directory tree")
+    def _change_root(self) -> None:
+        if os.path.exists(UserInput.value):
+            UserConfig.root = OSManager.get_abspath(
+                UserInput.value, return_path=True, force_real_path=False
+            )
+            os.chdir(UserConfig.root)
+            shorten_path = PathBeautify.truncate_path(UserConfig.root)
+            self.query_one(StatusBar).cwd = shorten_path
+            self._send_message(f"Changed working directory to {shorten_path}")
+        else:
+            self._send_message("Path does not exist", noti_type="Error")
 
-    def action_quit_app(self) -> None:
-        self.exit()
+    @on(Button.Pressed, "#change_root")
+    def button_change_root(self) -> None:
+        self._get_input()
+        self._change_root()
+
+    def _input_change_root(self) -> bool:
+        user_input: str = UserInput.value
+
+        if not user_input.strip():
+            return False
+
+        if user_input.startswith("cd "):
+            directory = user_input[3:].strip()
+        elif user_input.startswith("chdir "):
+            directory = user_input[6:].strip()
+        else:
+            return False
+
+        UserInput.value = directory
+        self._change_root()
+
+        return True
+
+    @on(Input.Submitted)
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.input.clear()
+        UserInput.value = event.value
+
+        listeners: List[Callable[[], bool]] = [self._input_change_root]
+
+        if not any(listener() for listener in listeners):
+            self._send_message(UserInput.value, noti_type="Unknown command")
 
 
 if __name__ == "__main__":

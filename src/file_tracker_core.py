@@ -343,6 +343,6 @@ if __name__ == "__main__":
         auto_save=True,
         auto_clean=True,
     )
-    tracker.add_dir("./../", root="./", recursive=True)
+    tracker.add_dir("./../", root="./", recursive=False)
     a = config_file_handler.read_config()
     print(a)
