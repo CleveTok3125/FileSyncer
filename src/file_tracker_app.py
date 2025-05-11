@@ -12,7 +12,13 @@ from textual.widgets import (
     Input,
     DirectoryTree,
 )
-from textual.containers import Container, Vertical, HorizontalGroup, Horizontal
+from textual.containers import (
+    Container,
+    Vertical,
+    HorizontalGroup,
+    Horizontal,
+    VerticalGroup,
+)
 from textual.reactive import reactive
 
 from file_tracker_core import ConfigFileHandler, Tracker, OSManager
@@ -217,10 +223,27 @@ class RefreshableDirectoryTree(DirectoryTree):
 class ActionButton(HorizontalGroup):
     def compose(self) -> ComposeResult:
         yield Button("Add File", id="add_file", classes="action-button")
-        yield Button("Add Directory", id="add_dir", classes="action-button")
-        yield Button("Remove File", id="remove_file", classes="action-button")
+        yield Button("Add Directory...", id="add_dir", classes="action-button")
+        yield Button("Remove...", id="removes", classes="action-button")
         yield Button("Set Filter", id="set_filter", classes="action-button")
         yield Button("Change CWD", id="change_root", classes="action-button")
+
+
+class PopupInfo(Static):
+    def on_mount(self) -> None:
+        self.message_display = Static("", classes="hidden popup-info-message")
+        self.mount(self.message_display)
+
+    def update_status(self, text: str) -> None:
+        self.message_display.update(f"Additional options for {text}")
+
+
+class AdditionalButton(HorizontalGroup):
+    def compose(self) -> ComposeResult:
+        yield Button("A", classes="hidden additional-button add-dir-popup")
+        yield Button("B", classes="hidden additional-button add-dir-popup")
+        yield Button("C", classes="hidden additional-button removes-popup")
+        yield Button("D", classes="hidden additional-button removes-popup")
 
 
 class MainApp(App):
@@ -230,11 +253,12 @@ class MainApp(App):
         ("d", "toggle_dark", "Toggle dark mode"),
         ("r", "refresh_tree", "Refresh tree"),
         ("s", "save_conf", "Save configuration"),
+        ("i", "focus_input", "Focus on input"),
     ]
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Vertical(
+        yield VerticalGroup(
             StatusBar(id="status-bar", classes="messages"),
             Horizontal(
                 TreeContainer(id="tree-container"),
@@ -245,6 +269,8 @@ class MainApp(App):
                 placeholder="Enter a path or regular expression here then select one of the buttons below",
                 id="input-bar",
             ),
+            PopupInfo(),
+            AdditionalButton(),
             ActionButton(),
         )
         yield Footer()
@@ -254,10 +280,8 @@ class MainApp(App):
             "textual-dark" if self.theme == "textual-light" else "textual-light"
         )
 
-    def _get_input(self) -> UserInput.value:
-        input = self.query_one(Input)
-        UserInput.value = input.value
-        input.value = ""
+    def action_focus_input(self) -> None:
+        self.query_one("#input-bar").focus()
 
     def _refresh_tree(self) -> None:
         tree_container = self.query_one(TreeContainer)
@@ -275,6 +299,11 @@ class MainApp(App):
 
     def action_quit_app(self) -> None:
         self.exit()
+
+    def _get_input(self) -> UserInput.value:
+        input = self.query_one(Input)
+        UserInput.value = input.value
+        input.value = ""
 
     @on(Button.Pressed, "#add_file")
     def button_add_file(self) -> None:
@@ -310,6 +339,35 @@ class MainApp(App):
         self._send_message(
             f"Changed filter pattern to {UserConfig.path_filter_pattern}"
         )
+
+    def _toggle_popup(
+        self, target_class: str, name: str, info_class: str = ".popup-info-message"
+    ) -> None:
+        self.query_one(PopupInfo).update_status(name)
+
+        target_popups = list(self.query(target_class))
+        info_boxes = list(self.query(info_class))
+        is_showing = any(not p.has_class("hidden") for p in target_popups)
+
+        for popup in self.query(".add-dir-popup, .removes-popup"):
+            popup.add_class("hidden")
+
+        for info in info_boxes:
+            info.add_class("hidden")
+
+        if not is_showing:
+            for popup in target_popups:
+                popup.remove_class("hidden")
+            for info in info_boxes:
+                info.remove_class("hidden")
+
+    @on(Button.Pressed, "#add_dir")
+    def button_add_dir(self) -> None:
+        self._toggle_popup(".add-dir-popup", "Add Directory")
+
+    @on(Button.Pressed, "#removes")
+    def button_removes(self) -> None:
+        self._toggle_popup(".removes-popup", "Remove")
 
     def _input_change_root(self) -> bool:
         user_input: str = UserInput.value
