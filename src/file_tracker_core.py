@@ -330,9 +330,27 @@ class Tracker:
         self.config["tracked"].update(file_dict)
 
     @_auto_export_config
-    @OSManager.format_abspath
-    def remove_file(self, path: str):
-        self.config["tracked"].pop(path, None)
+    def remove_file(self, key_path: str) -> None:
+        if isinstance(key_path, str) and not OSManager.is_absolute(key_path):
+            raise InvalidPath("PATH must be an absolute path")
+
+        self.config["tracked"].pop(key_path, None)
+
+    @_auto_export_config
+    def remove_dir(self, key_path: str | re.Pattern, is_regex: bool = False) -> None:
+        if isinstance(key_path, str) and not OSManager.is_absolute(key_path):
+            raise InvalidPathError("PATH must be an absolute path")
+
+        if is_regex:
+            pattern = (
+                key_path if isinstance(key_path, re.Pattern) else re.compile(key_path)
+            )
+            keys_to_remove = [key for key in tracked if pattern.match(key)]
+        else:
+            keys_to_remove = [key for key in tracked if key.startswith(key_path)]
+
+        for key in keys_to_remove:
+            del self.config["tracked"]
 
 
 if __name__ == "__main__":

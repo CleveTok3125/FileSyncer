@@ -112,11 +112,14 @@ class UserConfig:
     auto_save = True
     auto_clean = True
     path_filter_pattern = r""
+    is_filtered = True
 
 
 class UserInput:
     value = ""
 
+class UserSession:
+    ...
 
 class CoreInstance:
     config_file_handler: ConfigFileHandler = ConfigFileHandler(UserConfig.config_path)
@@ -164,13 +167,24 @@ class StatusBar(Static):
     )
     auto_save: reactive[bool] = reactive(UserConfig.auto_save)
     auto_clean: reactive[bool] = reactive(UserConfig.auto_clean)
-    filter_pattern = reactive(UserConfig.path_filter_pattern)
+    filter_pattern: reactive[str] = reactive(UserConfig.path_filter_pattern)
+    is_filtered: reactive[bool] = reactive(UserConfig.is_filtered)
+
+    def _get_status_message(self) -> str:
+        return " | ".join(
+            [
+                f"CWD: {self.cwd}",
+                f'Filter Pattern: r"{self.filter_pattern}" - {"Enabled" if self.is_filtered else "Disabled"}',
+                f"Auto-save: {'Enabled' if self.auto_save else 'Disabled'}",
+                f"Auto-clean: {'Enabled' if self.auto_clean else 'Disabled'}",
+            ]
+        )
 
     def on_mount(self) -> None:
         self.update_status()
 
     def update_status(self) -> None:
-        status_message = f'CWD: {self.cwd} | Filter Pattern: r"{self.filter_pattern}" | Auto-save: {"Enabled" if self.auto_save else "Disabled"} | Auto-clean: {"Enabled" if self.auto_clean else "Disabled"}'
+        status_message = self._get_status_message()
         self.update(status_message)
 
     def watch_cwd(self, new_value: str) -> None:
@@ -183,6 +197,9 @@ class StatusBar(Static):
         self.update_status()
 
     def watch_filter_pattern(self, new_value: str) -> None:
+        self.update_status()
+
+    def watch_is_filtered(self, new_value: bool) -> None:
         self.update_status()
 
 
@@ -240,10 +257,10 @@ class PopupInfo(Static):
 
 class AdditionalButton(HorizontalGroup):
     def compose(self) -> ComposeResult:
-        yield Button("A", classes="hidden additional-button add-dir-popup")
-        yield Button("B", classes="hidden additional-button add-dir-popup")
-        yield Button("C", classes="hidden additional-button removes-popup")
-        yield Button("D", classes="hidden additional-button removes-popup")
+        yield Button("Normal", classes="hidden additional-button add-dir-popup")
+        yield Button("Recursive", classes="hidden additional-button add-dir-popup")
+        yield Button("Remove File", classes="hidden additional-button removes-popup")
+        yield Button("Remove Directory", classes="hidden additional-button removes-popup")
 
 
 class MainApp(App):
@@ -253,6 +270,7 @@ class MainApp(App):
         ("d", "toggle_dark", "Toggle dark mode"),
         ("r", "refresh_tree", "Refresh tree"),
         ("s", "save_conf", "Save configuration"),
+        ("f", "toggle_filter", "Toggle Filter"),
         ("i", "focus_input", "Focus on input"),
     ]
 
@@ -283,6 +301,10 @@ class MainApp(App):
     def action_focus_input(self) -> None:
         self.query_one("#input-bar").focus()
 
+    def action_toggle_filter(self) -> None:
+        UserConfig.is_filtered = not UserConfig.is_filtered
+        self.query_one(StatusBar).is_filtered = UserConfig.is_filtered
+
     def _refresh_tree(self) -> None:
         tree_container = self.query_one(TreeContainer)
         tree_container.refresh_tree()
@@ -300,14 +322,20 @@ class MainApp(App):
     def action_quit_app(self) -> None:
         self.exit()
 
-    def _get_input(self) -> UserInput.value:
-        input = self.query_one(Input)
-        UserInput.value = input.value
-        input.value = ""
+    def _get_input(self) -> bool:
+        _input = self.query_one(Input)
+        if not (user_input := _input.value.strip()):
+            self._send_message("No input!")
+            return False
+        else:
+            UserInput.value = user_input
+            user_input = ""
+            return True
 
     @on(Button.Pressed, "#add_file")
     def button_add_file(self) -> None:
-        self._get_input()
+        if not self._get_input():
+            return
         tracker = CoreInstance.init_tracker()
         tracker.add_file(UserInput.value, UserConfig.root)
         self._refresh_tree()
@@ -328,12 +356,14 @@ class MainApp(App):
 
     @on(Button.Pressed, "#change_root")
     def button_change_root(self) -> None:
-        self._get_input()
+        if not self._get_input():
+            return
         self._change_root()
 
     @on(Button.Pressed, "#set_filter")
     def button_set_filter(self) -> None:
-        self._get_input()
+        if not self._get_input():
+            return
         UserConfig.path_filter_pattern = UserInput.value
         self.query_one(StatusBar).filter_pattern = UserConfig.path_filter_pattern
         self._send_message(
@@ -369,30 +399,48 @@ class MainApp(App):
     def button_removes(self) -> None:
         self._toggle_popup(".removes-popup", "Remove")
 
-    def _input_change_root(self) -> bool:
-        user_input: str = UserInput.value
+    def _extract_user_command(self, command_prefixes: List[str]) -> bool:
+        user_input: str = UserInput.value.strip()
 
         if not user_input.strip():
             return False
 
-        if user_input.startswith("cd "):
-            directory = user_input[3:].strip()
-        elif user_input.startswith("chdir "):
-            directory = user_input[6:].strip()
-        else:
-            return False
+        for command_prefix in command_prefixes:
+            if user_input.startswith(command_prefix):
+                UserInput.value = user_input[len(command_prefix) :]
+                return True
 
-        UserInput.value = directory
-        self._change_root()
+        return False
 
-        return True
+    def _input_change_root(self) -> bool:
+        result = self._extract_user_command(["cd", "chdir"])
+
+        if result:
+            self._change_root()
+
+        return result
+
+    def _input_add_file(self) -> bool:
+        result = self._extract_user_command(["add "])
+
+        if result:
+            # self._...()
+            pass
+
+        return result
+
+    def _input_add_dir(self) -> bool: ...
 
     @on(Input.Submitted)
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.input.clear()
         UserInput.value = event.value
 
-        listeners: List[Callable[[], bool]] = [self._input_change_root]
+        listeners: List[Callable[[], bool]] = [
+            self._input_change_root,
+            self._input_add_file,
+            self._input_add_dir,
+        ]
 
         if not any(listener() for listener in listeners):
             self._send_message(UserInput.value, noti_type="Unknown command")

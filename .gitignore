@@ -175,3 +175,4 @@ cython_debug/
 
 # Other
 user_config.json
+*.kate-swp
