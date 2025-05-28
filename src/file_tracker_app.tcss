@@ -55,3 +55,7 @@ AdditionalButton {
     padding: 1 1;
     background: $surface;
 }
+
+.change-queue-view {
+    height: 20%;
+}

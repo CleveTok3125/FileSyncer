@@ -1,5 +1,5 @@
 import os
-from typing import List, Callable
+from typing import List, Dict, Callable, Tuple, Any, Optional
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -18,10 +18,11 @@ from textual.containers import (
     HorizontalGroup,
     Horizontal,
     VerticalGroup,
+    ScrollableContainer,
 )
 from textual.reactive import reactive
 
-from file_tracker_core import ConfigFileHandler, Tracker, OSManager
+from file_tracker_core import ConfigFileHandler, Tracker, OSManager, FileFilter
 
 
 class PathBeautify:
@@ -109,23 +110,45 @@ class Forests:
 class UserConfig:
     root = "./"
     config_path = "user_config.json"
-    auto_save = True
+    auto_save = False
     auto_clean = True
     path_filter_pattern = r""
     is_filtered = True
+    only_match_filename = True
 
 
 class UserInput:
     value = ""
 
+
 class UserSession:
-    ...
+    added_files: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+    added_dirs: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+    removed_files: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+    removed_dirs: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+
+    @classmethod
+    def clear(cls):
+        cls.added_files.clear()
+        cls.added_dirs.clear()
+        cls.removed_files.clear()
+        cls.removed_dirs.clear()
+
 
 class CoreInstance:
     config_file_handler: ConfigFileHandler = ConfigFileHandler(UserConfig.config_path)
 
     @staticmethod
-    def init_tracker():
+    def init_filter(*, is_filtered: bool) -> FileFilter:
+        pattern = UserConfig.path_filter_pattern.strip() if is_filtered else None
+        file_filter = FileFilter(
+            pattern=pattern,
+            only_match_filename=UserConfig.only_match_filename,
+        )
+        return file_filter
+
+    @staticmethod
+    def init_tracker() -> Tracker:
         tracker = Tracker(
             config=CoreInstance.config_file_handler.safe_read_config(),
             config_path=UserConfig.config_path,
@@ -141,6 +164,32 @@ class CoreAPI:
         files_tracked: List[str] = CoreInstance.config_file_handler.get_files_tracked()
         files_tracked = PathBeautify.simplify(files_tracked)
         return files_tracked
+
+    @staticmethod
+    def add_file(*, auto_save: bool) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        args = (UserInput.value, UserConfig.root)
+        kwargs = {}
+
+        if auto_save:
+            tracker = CoreInstance.init_tracker()
+            tracker.add_file(*args, **kwargs)
+        else:
+            UserSession.added_files.append((args, kwargs))
+        return args, kwargs
+
+    @staticmethod
+    def add_dir(
+        *, recursive: bool, auto_save: bool
+    ) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        args = (UserInput.value, UserConfig.root)
+        kwargs = {"recursive": recursive}
+
+        if auto_save:
+            tracker = CoreInstance.init_tracker()
+            tracker.add_dir(*args, **kwargs)
+        else:
+            UserSession.added_dirs.append((args, kwargs))
+        return args, kwargs
 
 
 class MessageBar(Static):
@@ -169,12 +218,13 @@ class StatusBar(Static):
     auto_clean: reactive[bool] = reactive(UserConfig.auto_clean)
     filter_pattern: reactive[str] = reactive(UserConfig.path_filter_pattern)
     is_filtered: reactive[bool] = reactive(UserConfig.is_filtered)
+    only_match_filename: reactive[bool] = reactive(UserConfig.only_match_filename)
 
     def _get_status_message(self) -> str:
         return " | ".join(
             [
                 f"CWD: {self.cwd}",
-                f'Filter Pattern: r"{self.filter_pattern}" - {"Enabled" if self.is_filtered else "Disabled"}',
+                f'Filter Pattern {"(match file name)" if UserConfig.only_match_filename else ""}: r"{self.filter_pattern}" - {"Enabled" if self.is_filtered else "Disabled"}',
                 f"Auto-save: {'Enabled' if self.auto_save else 'Disabled'}",
                 f"Auto-clean: {'Enabled' if self.auto_clean else 'Disabled'}",
             ]
@@ -260,7 +310,60 @@ class AdditionalButton(HorizontalGroup):
         yield Button("Normal", classes="hidden additional-button add-dir-popup")
         yield Button("Recursive", classes="hidden additional-button add-dir-popup")
         yield Button("Remove File", classes="hidden additional-button removes-popup")
-        yield Button("Remove Directory", classes="hidden additional-button removes-popup")
+        yield Button(
+            "Remove Directory", classes="hidden additional-button removes-popup"
+        )
+
+
+class ChangeItem(Static):
+    def __init__(
+        self,
+        change: Tuple[Tuple[Any, ...], Dict[str, Any]],
+        label: str = "Change",
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.args, self.kwargs = change
+        self.label = label
+
+    def format_change_message(
+        self, args: Tuple[Any, ...], kwargs: Dict[str, Any], label: str = "Change"
+    ) -> str:
+        arg_str = ", ".join(repr(a) for a in args)
+        kwarg_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+        parts = [arg_str] if not kwarg_str else [arg_str, kwarg_str]
+        return f"{label}: " + " | ".join(filter(None, parts))
+
+    def on_mount(self):
+        message = self.format_change_message(self.args, self.kwargs, self.label)
+        self.update(message)
+
+
+class ChangeQueueView(ScrollableContainer):
+    changes: list[Tuple[Tuple[Any, ...], Dict[str, Any], str]] = []
+    pending_change: reactive[Optional[Tuple[Tuple[Any, ...], Dict[str, Any], str]]] = (
+        reactive(None)
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def compose(self) -> ComposeResult:
+        for args, kwargs, label in self.changes:
+            yield ChangeItem((args, kwargs), label=label)
+
+    def watch_pending_change(
+        self, change: Optional[Tuple[Tuple[Any, ...], Dict[str, Any], str]]
+    ):
+        if change is not None:
+            self.changes.append(change)
+            self.pending_change = None
+            self.refresh_changes()
+
+    def refresh_changes(self):
+        self.remove_children()
+        for args, kwargs, label in self.changes:
+            self.mount(ChangeItem((args, kwargs), label=label))
 
 
 class MainApp(App):
@@ -282,6 +385,7 @@ class MainApp(App):
                 TreeContainer(id="tree-container"),
                 RefreshableDirectoryTree(),
             ),
+            ChangeQueueView(classes="change-queue-view"),
             MessageBar(id="message-bar", classes="messages"),
             Input(
                 placeholder="Enter a path or regular expression here then select one of the buttons below",
@@ -336,10 +440,15 @@ class MainApp(App):
     def button_add_file(self) -> None:
         if not self._get_input():
             return
-        tracker = CoreInstance.init_tracker()
-        tracker.add_file(UserInput.value, UserConfig.root)
-        self._refresh_tree()
-        self._send_message("File added successfully")
+
+        args, kwargs = CoreAPI.add_file(auto_save=UserConfig.auto_save)
+
+        if UserConfig.auto_save:
+            self._refresh_tree()
+            self._send_message("File added successfully")
+        else:
+            self.query_one(ChangeQueueView).pending_change = args, kwargs, "Added file"
+            self._send_message("File added to queue")
 
     def _change_root(self) -> None:
         if os.path.exists(UserInput.value):
