@@ -307,11 +307,25 @@ class PopupInfo(Static):
 
 class AdditionalButton(HorizontalGroup):
     def compose(self) -> ComposeResult:
-        yield Button("Normal", classes="hidden additional-button add-dir-popup")
-        yield Button("Recursive", classes="hidden additional-button add-dir-popup")
-        yield Button("Remove File", classes="hidden additional-button removes-popup")
         yield Button(
-            "Remove Directory", classes="hidden additional-button removes-popup"
+            "Normal",
+            id="add_dir_normal",
+            classes="hidden additional-button add-dir-popup",
+        )
+        yield Button(
+            "Recursive",
+            id="add_dir_recursive",
+            classes="hidden additional-button add-dir-popup",
+        )
+        yield Button(
+            "Remove File",
+            id="remove_file",
+            classes="hidden additional-button removes-popup",
+        )
+        yield Button(
+            "Remove Directory",
+            id="remove_directory",
+            classes="hidden additional-button removes-popup",
         )
 
 
@@ -366,15 +380,164 @@ class ChangeQueueView(ScrollableContainer):
             self.mount(ChangeItem((args, kwargs), label=label))
 
 
-class MainApp(App):
+class AppDisplayHandler:
+    def _send_message(
+        self, message: str, *, noti_type: str = "Message", timeout: float = 3.0
+    ) -> None:
+        message_bar = self.query_one("#message-bar", MessageBar)
+        message_bar.show_message(f"{noti_type}: {message}", timeout)
+
+    def _toggle_popup(
+        self, target_class: str, name: str, info_class: str = ".popup-info-message"
+    ) -> None:
+        self.query_one(PopupInfo).update_status(name)
+
+        target_popups = list(self.query(target_class))
+        info_boxes = list(self.query(info_class))
+        is_showing = any(not p.has_class("hidden") for p in target_popups)
+
+        for popup in self.query(".add-dir-popup, .removes-popup"):
+            popup.add_class("hidden")
+
+        for info in info_boxes:
+            info.add_class("hidden")
+
+        if not is_showing:
+            for popup in target_popups:
+                popup.remove_class("hidden")
+            for info in info_boxes:
+                info.remove_class("hidden")
+
+    def _refresh_tree(self) -> None:
+        tree_container = self.query_one(TreeContainer)
+        tree_container.refresh_tree()
+
+    def _update_input_with_path(self, event) -> None:
+        input_field = self.query_one(Input)
+        input_field.value = str(event.path)
+
+
+class AppInputHandler:
+    def _get_input(self) -> bool:
+        _input = self.query_one(Input)
+        if not (user_input := _input.value.strip()):
+            self._send_message("No input!")
+            return False
+        else:
+            UserInput.value = user_input
+            user_input = ""
+            return True
+
+    def _extract_user_command(self, command_prefixes: List[str]) -> bool:
+        user_input: str = UserInput.value.strip()
+
+        if not user_input.strip():
+            return False
+
+        for command_prefix in command_prefixes:
+            if user_input.startswith(command_prefix):
+                UserInput.value = user_input[len(command_prefix) + 1 :]
+                return True
+
+        return False
+
+
+class AppCallAPI:
+    def _change_root(self) -> None:
+        try:
+            new_path = OSManager.get_abspath(
+                UserInput.value, return_path=True, force_real_path=False
+            )
+            if os.path.exists(new_path):
+                UserConfig.root = new_path
+                os.chdir(UserConfig.root)
+                shorten_path = PathBeautify.truncate_path(UserConfig.root)
+                self.query_one(StatusBar).cwd = shorten_path
+                self.query_one(RefreshableDirectoryTree).reload_tree()
+                self._send_message(f"Changed working directory to {shorten_path}")
+            else:
+                self._send_message(
+                    f"Path does not exist: {new_path}", noti_type="Error"
+                )
+        except NotADirectoryError:
+            self._send_message(new_path, noti_type="NotADirectoryError")
+
+    def _add_file(self) -> None:
+        if not self._get_input():
+            return
+
+        args, kwargs = CoreAPI.add_file(auto_save=UserConfig.auto_save)
+
+        if UserConfig.auto_save:
+            self._refresh_tree()
+            self._send_message("File added successfully")
+        else:
+            self.query_one(ChangeQueueView).pending_change = args, kwargs, "Added file"
+            self._send_message("File added to queue")
+
+    def _add_dir(self, *, recursive: bool) -> None:
+        if not self._get_input():
+            return
+
+        if not os.path.isdir(UserInput.value):
+            self._send_message(
+                f"Path is not a directory: {UserInput.value}",
+                noti_type="NotADirectoryError",
+            )
+            return
+
+        args, kwargs = CoreAPI.add_dir(
+            auto_save=UserConfig.auto_save, recursive=recursive
+        )
+
+        if UserConfig.auto_save:
+            self._refresh_tree()
+            self._send_message("Files added successfully")
+        else:
+            self.query_one(ChangeQueueView).pending_change = (
+                args,
+                kwargs,
+                "Added files",
+            )
+            self._send_message("Files added to queue")
+
+
+class AppSelfDefineInput:
+    def _input_change_root(self) -> bool:
+        result = self._extract_user_command(["cd", "chdir"])
+
+        if result:
+            self._change_root()
+
+        return result
+
+    def _input_add_file(self) -> bool:
+        result = self._extract_user_command(["add "])
+
+        if result:
+            self._add_file()
+
+        return result
+
+    def _input_add_dir(self) -> bool:
+        result = self._extract_user_command(["add-dir ", "add dir "])
+
+        if result:
+            pass
+
+        return result
+
+
+class MainApp(App, AppDisplayHandler, AppInputHandler, AppCallAPI, AppSelfDefineInput):
     CSS_PATH = "file_tracker_app.tcss"
     BINDINGS = [
         ("q", "quit_app", "Quit"),
-        ("d", "toggle_dark", "Toggle dark mode"),
         ("r", "refresh_tree", "Refresh tree"),
         ("s", "save_conf", "Save configuration"),
         ("f", "toggle_filter", "Toggle Filter"),
         ("i", "focus_input", "Focus on input"),
+        ("c", "clear_input", "Clear input"),
+        ("d", "toggle_dark", "Toggle dark mode"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -409,16 +572,6 @@ class MainApp(App):
         UserConfig.is_filtered = not UserConfig.is_filtered
         self.query_one(StatusBar).is_filtered = UserConfig.is_filtered
 
-    def _refresh_tree(self) -> None:
-        tree_container = self.query_one(TreeContainer)
-        tree_container.refresh_tree()
-
-    def _send_message(
-        self, message: str, *, noti_type: str = "Message", timeout: float = 3.0
-    ) -> None:
-        message_bar = self.query_one("#message-bar", MessageBar)
-        message_bar.show_message(f"{noti_type}: {message}", timeout)
-
     def action_refresh_tree(self) -> None:
         self._refresh_tree()
         self._send_message("Reloaded directory tree")
@@ -426,42 +579,12 @@ class MainApp(App):
     def action_quit_app(self) -> None:
         self.exit()
 
-    def _get_input(self) -> bool:
-        _input = self.query_one(Input)
-        if not (user_input := _input.value.strip()):
-            self._send_message("No input!")
-            return False
-        else:
-            UserInput.value = user_input
-            user_input = ""
-            return True
+    def action_clear_input(self) -> None:
+        self.query_one(Input).value = UserInput.value = ""
 
     @on(Button.Pressed, "#add_file")
     def button_add_file(self) -> None:
-        if not self._get_input():
-            return
-
-        args, kwargs = CoreAPI.add_file(auto_save=UserConfig.auto_save)
-
-        if UserConfig.auto_save:
-            self._refresh_tree()
-            self._send_message("File added successfully")
-        else:
-            self.query_one(ChangeQueueView).pending_change = args, kwargs, "Added file"
-            self._send_message("File added to queue")
-
-    def _change_root(self) -> None:
-        if os.path.exists(UserInput.value):
-            UserConfig.root = OSManager.get_abspath(
-                UserInput.value, return_path=True, force_real_path=False
-            )
-            os.chdir(UserConfig.root)
-            shorten_path = PathBeautify.truncate_path(UserConfig.root)
-            self.query_one(StatusBar).cwd = shorten_path
-            self.query_one(RefreshableDirectoryTree).reload_tree()
-            self._send_message(f"Changed working directory to {shorten_path}")
-        else:
-            self._send_message("Path does not exist", noti_type="Error")
+        self._add_file()
 
     @on(Button.Pressed, "#change_root")
     def button_change_root(self) -> None:
@@ -479,66 +602,21 @@ class MainApp(App):
             f"Changed filter pattern to {UserConfig.path_filter_pattern}"
         )
 
-    def _toggle_popup(
-        self, target_class: str, name: str, info_class: str = ".popup-info-message"
-    ) -> None:
-        self.query_one(PopupInfo).update_status(name)
-
-        target_popups = list(self.query(target_class))
-        info_boxes = list(self.query(info_class))
-        is_showing = any(not p.has_class("hidden") for p in target_popups)
-
-        for popup in self.query(".add-dir-popup, .removes-popup"):
-            popup.add_class("hidden")
-
-        for info in info_boxes:
-            info.add_class("hidden")
-
-        if not is_showing:
-            for popup in target_popups:
-                popup.remove_class("hidden")
-            for info in info_boxes:
-                info.remove_class("hidden")
-
     @on(Button.Pressed, "#add_dir")
     def button_add_dir(self) -> None:
         self._toggle_popup(".add-dir-popup", "Add Directory")
 
+    @on(Button.Pressed, "#add_dir_normal")
+    def button_add_dir_normal(self) -> None:
+        self._add_dir(recursive=False)
+
+    @on(Button.Pressed, "#add_dir_recursive")
+    def button_add_dir_recursive(self) -> None:
+        self._add_dir(recursive=True)
+
     @on(Button.Pressed, "#removes")
     def button_removes(self) -> None:
         self._toggle_popup(".removes-popup", "Remove")
-
-    def _extract_user_command(self, command_prefixes: List[str]) -> bool:
-        user_input: str = UserInput.value.strip()
-
-        if not user_input.strip():
-            return False
-
-        for command_prefix in command_prefixes:
-            if user_input.startswith(command_prefix):
-                UserInput.value = user_input[len(command_prefix) :]
-                return True
-
-        return False
-
-    def _input_change_root(self) -> bool:
-        result = self._extract_user_command(["cd", "chdir"])
-
-        if result:
-            self._change_root()
-
-        return result
-
-    def _input_add_file(self) -> bool:
-        result = self._extract_user_command(["add "])
-
-        if result:
-            # self._...()
-            pass
-
-        return result
-
-    def _input_add_dir(self) -> bool: ...
 
     @on(Input.Submitted)
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -553,10 +631,6 @@ class MainApp(App):
 
         if not any(listener() for listener in listeners):
             self._send_message(UserInput.value, noti_type="Unknown command")
-
-    def _update_input_with_path(self, event) -> None:
-        input_field = self.query_one(Input)
-        input_field.value = str(event.path)
 
     @on(DirectoryTree.DirectorySelected)
     def on_directory_selected(self, event: DirectoryTree.DirectorySelected) -> None:
