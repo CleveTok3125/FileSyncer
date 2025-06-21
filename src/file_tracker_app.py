@@ -191,6 +191,31 @@ class CoreAPI:
             UserSession.added_dirs.append((args, kwargs))
         return args, kwargs
 
+    @staticmethod
+    def remove_file(*, auto_save: bool) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        args = (UserInput.value,)
+        kwargs = {}
+
+        if auto_save:
+            tracker = CoreInstance.init_tracker()
+            tracker.remove_file(*args, **kwargs)
+        else:
+            UserSession.removed_files.append((args, kwargs))
+        return args, kwargs
+
+    @staticmethod
+    def remove_dir(*, auto_save: bool) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        args = (UserInput.value,)
+        kwargs = {"is_regex": UserInput.is_filtered}
+
+        if auto_save:
+            tracker = CoreInstance.init_tracker()
+            tracker.remove_dir(*args, **kwargs)
+        else:
+            UserSession.removed_dirs.append((args, kwargs))
+
+        return args, kwargs
+
 
 class MessageBar(Static):
     def on_mount(self):
@@ -501,6 +526,40 @@ class AppCallAPI:
             )
             self._send_message("Files added to queue")
 
+    def _remove_file(self) -> None:
+        if not self._get_input():
+            return
+
+        args, kwargs = CoreAPI.remove_file(auto_save=UserConfig.auto_save)
+
+        if UserConfig.auto_save:
+            self._refresh_tree()
+            self._send_message("File removed successfully")
+        else:
+            self.query_one(ChangeQueueView).pending_change = (
+                args,
+                kwargs,
+                "Removed file",
+            )
+            self._send_message("File removal added to queue")
+
+    def _remove_dir(self) -> None:
+        if not self._get_input():
+            return
+
+        args, kwargs = CoreAPI.remove_dir(auto_save=UserConfig.auto_save)
+
+        if UserConfig.auto_save:
+            self._refresh_tree()
+            self._send_message("Directory removed successfully")
+        else:
+            self.query_one(ChangeQueueView).pending_change = (
+                args,
+                kwargs,
+                "Removed directory",
+            )
+            self._send_message("Directory removal added to queue")
+
 
 class AppSelfDefineInput:
     def _input_change_root(self) -> bool:
@@ -617,6 +676,14 @@ class MainApp(App, AppDisplayHandler, AppInputHandler, AppCallAPI, AppSelfDefine
     @on(Button.Pressed, "#removes")
     def button_removes(self) -> None:
         self._toggle_popup(".removes-popup", "Remove")
+
+    @on(Button.Pressed, "#remove_file")
+    def button_remove_file(self) -> None:
+        self._remove_file()
+
+    @on(Button.Pressed, "#remove_dir")
+    def button_remove_dir(self) -> None:
+        self._remove_dir()
 
     @on(Input.Submitted)
     def on_input_submitted(self, event: Input.Submitted) -> None:
